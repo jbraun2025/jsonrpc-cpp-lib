@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 #include "jsonrpc/client/request.hpp"
+#include "jsonrpc/server/types.hpp"
 #include "jsonrpc/transport/transport.hpp"
 
 namespace jsonrpc::client {
@@ -71,15 +73,20 @@ class Client {
    * @brief Sends a JSON-RPC method call and waits for the response.
    *
    * This is a blocking call that sends a method request to the server and waits
-   * for the corresponding response.
+   * for the corresponding response. If no response is received within the
+   * timeout period, throws a runtime_error.
    *
    * @param method The name of the method to call.
    * @param params Optional parameters to pass to the method.
+   * @param timeout Maximum time to wait for response.
    * @return The JSON response received from the server.
+   * @throws std::runtime_error if the request times out.
    */
   auto SendMethodCall(
       const std::string &method,
-      std::optional<nlohmann::json> params = std::nullopt) -> nlohmann::json;
+      std::optional<nlohmann::json> params = std::nullopt,
+      std::chrono::milliseconds timeout = std::chrono::seconds(30))
+      -> nlohmann::json;
 
   /**
    * @brief Sends a JSON-RPC method call asynchronously.
@@ -114,6 +121,15 @@ class Client {
    * @return True if there are pending requests, false otherwise.
    */
   auto HasPendingRequests() const -> bool;
+
+  /**
+   * @brief Registers a handler for notifications received from the server.
+   *
+   * @param method The name of the notification method to handle.
+   * @param handler The function to handle the notification.
+   */
+  void RegisterNotification(
+      const std::string &method, const server::NotificationHandler &handler);
 
  private:
   /// @brief Listener thread function for receiving responses from the transport
@@ -189,6 +205,13 @@ class Client {
 
   /// Flag to control the running state of the listener thread.
   std::atomic<bool> is_running_{false};
+
+  /// Map of notification handlers
+  std::unordered_map<std::string, server::NotificationHandler>
+      notification_handlers_;
+
+  /// Mutex to protect access to the notification handlers map
+  mutable std::mutex notification_handlers_mutex_;
 };
 
 }  // namespace jsonrpc::client

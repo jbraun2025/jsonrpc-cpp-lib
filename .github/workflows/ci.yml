@@ -75,11 +75,17 @@ jobs:
 
       - name: Build with Bazel
         run: |
+          # Build release configuration
           bazel build //...
+          # Build debug configuration
+          bazel build //... --config=debug
 
       - name: Test with Bazel
         run: |
+          # Test release configuration
           bazel test //...
+          # Test debug configuration
+          bazel test //... --config=debug
 
   docs:
     runs-on: ubuntu-latest
