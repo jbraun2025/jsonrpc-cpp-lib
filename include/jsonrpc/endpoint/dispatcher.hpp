@@ -8,11 +8,11 @@
 #include <BS_thread_pool.hpp>
 #include <nlohmann/json.hpp>
 
-#include "jsonrpc/server/request.hpp"
-#include "jsonrpc/server/response.hpp"
-#include "jsonrpc/server/types.hpp"
+#include "jsonrpc/endpoint/request.hpp"
+#include "jsonrpc/endpoint/response.hpp"
+#include "jsonrpc/endpoint/types.hpp"
 
-namespace jsonrpc::server {
+namespace jsonrpc::endpoint {
 
 /**
  * @brief Dispatcher for JSON-RPC requests.
@@ -215,4 +215,4 @@ class Dispatcher {
   BS::thread_pool thread_pool_;
 };
 
-}  // namespace jsonrpc::server
+}  // namespace jsonrpc::endpoint
