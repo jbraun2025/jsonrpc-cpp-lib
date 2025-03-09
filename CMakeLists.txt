@@ -25,21 +25,22 @@ file(GLOB_RECURSE SOURCES "src/*.cpp")
 add_library(jsonrpc-cpp-lib ${SOURCES})
 
 # Include directories for the library
-target_include_directories(jsonrpc-cpp-lib PUBLIC include)
+target_include_directories(jsonrpc-cpp-lib PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:include>
+)
 
 # Check for Conan usage
 if(USE_CONAN)
     # Find and link dependencies via Conan
     find_package(nlohmann_json REQUIRED)
     find_package(spdlog REQUIRED)
-    find_package(bshoshany-thread-pool REQUIRED)
     find_package(asio REQUIRED)
 
     # Link dependencies
     target_link_libraries(jsonrpc-cpp-lib PUBLIC
         nlohmann_json::nlohmann_json
         spdlog::spdlog
-        bshoshany-thread-pool::bshoshany-thread-pool
         asio::asio
     )
 else()
@@ -61,19 +62,6 @@ else()
     FetchContent_MakeAvailable(spdlog)
 
     FetchContent_Declare(
-        bshoshany_thread_pool
-        GIT_REPOSITORY https://github.com/bshoshany/thread-pool.git
-        GIT_TAG v4.1.0
-    )
-    FetchContent_MakeAvailable(bshoshany_thread_pool)
-
-    # Manually create the bshoshany-thread-pool target
-    add_library(bshoshany-thread-pool INTERFACE)
-    target_include_directories(bshoshany-thread-pool INTERFACE
-        ${bshoshany_thread_pool_SOURCE_DIR}/include
-    )
-
-    FetchContent_Declare(
         asio
         GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
         GIT_TAG asio-1-28-2
@@ -90,7 +78,6 @@ else()
     target_link_libraries(jsonrpc-cpp-lib PUBLIC
         nlohmann_json::nlohmann_json
         spdlog::spdlog
-        bshoshany-thread-pool
         asio
     )
 endif()
@@ -142,3 +129,81 @@ if(BUILD_TESTS AND EXISTS "${CMAKE_SOURCE_DIR}/tests")
 
     add_subdirectory(tests)
 endif()
+
+# ----------------------------------------------------------------
+# Installation and export configuration
+# ----------------------------------------------------------------
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Make the library installable
+install(
+    TARGETS jsonrpc-cpp-lib
+    EXPORT jsonrpc-cpp-lib-targets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Install header files
+install(
+    DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+)
+
+# Create a simple config file that includes the targets file
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-libConfig.cmake" "
+# jsonrpc-cpp-lib CMake configuration file
+include(CMakeFindDependencyMacro)
+
+# Find dependencies
+find_dependency(nlohmann_json REQUIRED)
+find_dependency(spdlog REQUIRED)
+
+# Include targets file
+include(\"\${CMAKE_CURRENT_LIST_DIR}/jsonrpc-cpp-lib-targets.cmake\")
+")
+
+# Generate the version file
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-libConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+# Install CMake config files
+install(
+    FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-libConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-libConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/jsonrpc-cpp-lib
+)
+
+# Export targets
+install(
+    EXPORT jsonrpc-cpp-lib-targets
+    FILE jsonrpc-cpp-lib-targets.cmake
+    NAMESPACE jsonrpc::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/jsonrpc-cpp-lib
+)
+
+# Generate export targets for build tree
+export(
+    EXPORT jsonrpc-cpp-lib-targets
+    FILE "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-lib-targets.cmake"
+    NAMESPACE jsonrpc::
+)
+
+# Configure and install pkg-config file
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/jsonrpc-cpp-lib.pc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-lib.pc"
+    @ONLY
+)
+
+install(
+    FILES "${CMAKE_CURRENT_BINARY_DIR}/jsonrpc-cpp-lib.pc"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/pkgconfig"
+)

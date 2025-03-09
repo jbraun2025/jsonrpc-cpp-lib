@@ -1,11 +1,11 @@
 #pragma once
 
-#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <variant>
 
+#include <asio.hpp>
 #include <nlohmann/json.hpp>
 
 namespace jsonrpc::endpoint {
@@ -23,25 +23,20 @@ enum class ErrorCode {
   kInternalError = -32603,   ///< Internal JSON-RPC error
 
   // Implementation-defined server errors
-  kServerError = -32000,  ///< Generic server error
+  kServerError = -32000,     ///< Generic server error
+  kTransportError = -32010,  ///< Transport-related error
+  kTimeoutError = -32001,    ///< Timeout error
 };
 
 /// Type for request IDs that can be either integer or string
 using RequestId = std::variant<int64_t, std::string>;
 
-/// Type for handling responses to requests
-using ResponseCallback = std::function<void(const nlohmann::json&)>;
-
-/// Type for handling method calls
+/// Type for handling method calls - now synchronous for simplicity
 using MethodCallHandler =
-    std::function<nlohmann::json(const std::optional<nlohmann::json>& params)>;
+    nlohmann::json(const std::optional<nlohmann::json>& params);
 
-/// Type for handling notifications
-using NotificationHandler =
-    std::function<void(const std::optional<nlohmann::json>& params)>;
-
-/// Type for handling errors
-using ErrorHandler = std::function<void(ErrorCode, const std::string&)>;
+/// Type for handling notifications - now synchronous for simplicity
+using NotificationHandler = void(const std::optional<nlohmann::json>& params);
 
 /// Type for a handler which can be either a method call handler or notification
 /// handler
