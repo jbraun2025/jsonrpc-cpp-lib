@@ -5,7 +5,7 @@
 
 namespace jsonrpc::endpoint {
 
-Dispatcher::Dispatcher(std::shared_ptr<TaskExecutor> executor)
+Dispatcher::Dispatcher(asio::any_io_executor executor)
     : executor_(std::move(executor)) {
 }
 
@@ -19,23 +19,31 @@ void Dispatcher::RegisterNotification(
   notification_handlers_[method] = handler;
 }
 
-auto Dispatcher::DispatchRequest(const std::string& request)
+auto Dispatcher::DispatchRequest(std::string request)
     -> asio::awaitable<std::optional<std::string>> {
-  auto request_json = Request::ParseAndValidateJson(request);
-  if (!request_json) {
+  nlohmann::json request_json;
+  try {
+    request_json = nlohmann::json::parse(request);
+  } catch (const nlohmann::json::parse_error& e) {
     co_return Response::CreateLibError(ErrorCode::kParseError).ToStr();
   }
 
-  // Handle empty batch requests
-  if (request_json->is_array() && request_json->empty()) {
+  // Now validate the request
+  if (request_json.is_object() && !Request::ValidateJson(request_json)) {
+    // This is an invalid request error
     co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
   }
 
-  if (request_json->is_array()) {
-    co_return co_await DispatchBatchRequest(*request_json);
+  // Handle empty batch requests
+  if (request_json.is_array() && request_json.empty()) {
+    co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
   }
 
-  auto response_json = co_await DispatchSingleRequest(*request_json);
+  if (request_json.is_array()) {
+    co_return co_await DispatchBatchRequest(request_json);
+  }
+
+  auto response_json = co_await DispatchSingleRequest(request_json);
   if (!response_json) {
     co_return std::nullopt;
   }
@@ -43,7 +51,7 @@ auto Dispatcher::DispatchRequest(const std::string& request)
   co_return response_json->dump();
 }
 
-auto Dispatcher::DispatchSingleRequest(const nlohmann::json& request_json)
+auto Dispatcher::DispatchSingleRequest(nlohmann::json request_json)
     -> asio::awaitable<std::optional<nlohmann::json>> {
   auto validation_result = ValidateRequest(request_json);
   if (validation_result) {
@@ -56,23 +64,24 @@ auto Dispatcher::DispatchSingleRequest(const nlohmann::json& request_json)
   if (request.IsNotification()) {
     auto it = notification_handlers_.find(method);
     if (it != notification_handlers_.end()) {
-      executor_->ExecuteDetached(
-          [handler = it->second,
-           params = request.GetParams()]() -> asio::awaitable<void> {
+      co_spawn(
+          executor_,
+          [handler = it->second, params = request.GetParams()] {
             return handler(params);
-          });
+          },
+          asio::detached);
     }
     co_return std::nullopt;
   }
 
   auto it = method_handlers_.find(method);
   if (it != method_handlers_.end()) {
-    auto result = co_await executor_->Execute(
-        [handler = it->second,
-         params = request.GetParams()]() -> asio::awaitable<nlohmann::json> {
+    auto result = co_await asio::co_spawn(
+        executor_,
+        [handler = it->second, params = request.GetParams()] {
           return handler(params);
-        });
-
+        },
+        asio::use_awaitable);
     co_return Response::CreateResult(result, request.GetId()).ToJson();
   }
 
@@ -81,7 +90,7 @@ auto Dispatcher::DispatchSingleRequest(const nlohmann::json& request_json)
       .ToJson();
 }
 
-auto Dispatcher::DispatchBatchRequest(const nlohmann::json& request_json)
+auto Dispatcher::DispatchBatchRequest(nlohmann::json request_json)
     -> asio::awaitable<std::optional<std::string>> {
   if (request_json.empty()) {
     co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
@@ -126,9 +135,6 @@ auto Dispatcher::DispatchBatchRequest(const nlohmann::json& request_json)
 
 auto Dispatcher::ValidateRequest(const nlohmann::json& request_json)
     -> std::optional<Response> {
-  // We've already validated basic structure in ParseAndValidateJson
-  // Here we validate method existence and other semantics
-
   if (!request_json.contains("method")) {
     return Response::CreateLibError(
         ErrorCode::kInvalidRequest, "Method is required");

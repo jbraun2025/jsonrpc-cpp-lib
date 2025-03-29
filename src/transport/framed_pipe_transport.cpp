@@ -1,5 +1,7 @@
 #include "jsonrpc/transport/framed_pipe_transport.hpp"
 
+#include <array>
+#include <string_view>
 #include <unistd.h>
 
 #include <spdlog/spdlog.h>
@@ -7,12 +9,12 @@
 namespace jsonrpc::transport {
 
 FramedPipeTransport::FramedPipeTransport(
-    asio::io_context& io_context, const std::string& socket_path,
+    asio::any_io_executor executor, const std::string& socket_path,
     bool is_server)
-    : PipeTransport(io_context, socket_path, is_server) {
+    : PipeTransport(std::move(executor), socket_path, is_server) {
 }
 
-auto FramedPipeTransport::SendMessage(const std::string& message)
+auto FramedPipeTransport::SendMessage(std::string message)
     -> asio::awaitable<void> {
   auto framed_message = MessageFramer::Frame(message);
   co_await asio::async_write(
@@ -35,15 +37,15 @@ auto FramedPipeTransport::ReceiveMessage() -> asio::awaitable<std::string> {
     }
 
     // Need more data
-    char buf[4096];
+    std::array<char, 4096> buffer{};
     size_t n = co_await GetSocket().async_read_some(
-        asio::buffer(buf), asio::use_awaitable);
+        asio::buffer(buffer.data(), buffer.size()), asio::use_awaitable);
 
     if (n == 0) {
       throw std::runtime_error("Connection closed by peer");
     }
 
-    read_buffer_.append(buf, n);
+    read_buffer_.append(std::string_view(buffer.data(), n));
   }
 }
 

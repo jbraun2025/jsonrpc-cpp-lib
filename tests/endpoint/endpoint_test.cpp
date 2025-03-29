@@ -1,3 +1,5 @@
+#include "jsonrpc/endpoint/endpoint.hpp"
+
 #include <memory>
 
 #include <asio.hpp>
@@ -9,7 +11,6 @@
 #include <spdlog/spdlog.h>
 
 #include "../common/mock_transport.hpp"
-#include "jsonrpc/endpoint/endpoint.hpp"
 
 using jsonrpc::endpoint::RpcEndpoint;
 using jsonrpc::test::MockTransport;
@@ -18,17 +19,27 @@ using Json = nlohmann::json;
 namespace {
 
 // Simple ASIO test runner that handles coroutines and proper completion
-template <typename F>
-void RunTest(F&& test_fn) {
+template <typename TestFunc>
+auto RunTest(TestFunc&& test_func) {
   auto cout_sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
   auto logger = std::make_shared<spdlog::logger>("server_logger", cout_sink);
   spdlog::set_default_logger(logger);
   spdlog::set_level(spdlog::level::debug);
-  asio::io_context io_ctx;
 
+  // Create io_context and get executor
+  asio::io_context io_ctx;
+  auto executor = io_ctx.get_executor();
+
+  // Use a non-coroutine lambda to launch the test function
   asio::co_spawn(
-      io_ctx, [&]() -> asio::awaitable<void> { co_await test_fn(io_ctx); },
+      io_ctx,
+      [f = std::forward<TestFunc>(test_func), executor]() {
+        // Return the awaitable directly - not a coroutine lambda
+        return f(executor);
+      },
       asio::detached);
+
+  // Run the io_context
   io_ctx.run();
 }
 
@@ -37,11 +48,11 @@ void RunTest(F&& test_fn) {
 // Basic Lifecycle Tests
 TEST_CASE("RpcEndpoint - Basic lifecycle", "[endpoint]") {
   SECTION("Start and shutdown") {
-    RunTest([](asio::io_context& io_ctx) -> asio::awaitable<void> {
+    RunTest([](asio::any_io_executor executor) -> asio::awaitable<void> {
       // Create transport and endpoint
-      auto transport = std::make_unique<MockTransport>(io_ctx);
+      auto transport = std::make_unique<MockTransport>(executor);
       auto endpoint =
-          std::make_unique<RpcEndpoint>(io_ctx, std::move(transport));
+          std::make_unique<RpcEndpoint>(executor, std::move(transport));
 
       // Start and shutdown
       co_await endpoint->Start();
@@ -50,11 +61,11 @@ TEST_CASE("RpcEndpoint - Basic lifecycle", "[endpoint]") {
   }
 
   SECTION("Double Start prevention") {
-    RunTest([](asio::io_context& io_ctx) -> asio::awaitable<void> {
+    RunTest([](asio::any_io_executor executor) -> asio::awaitable<void> {
       // Create transport and endpoint
-      auto transport = std::make_unique<MockTransport>(io_ctx);
+      auto transport = std::make_unique<MockTransport>(executor);
       auto endpoint =
-          std::make_unique<RpcEndpoint>(io_ctx, std::move(transport));
+          std::make_unique<RpcEndpoint>(executor, std::move(transport));
 
       // First start should succeed
       co_await endpoint->Start();

@@ -30,9 +30,16 @@ auto ParsePipeArguments(const std::vector<std::string>& args) -> std::string {
   return args[1].substr(pipe_prefix.length());
 }
 
-void RegisterLSPHandlers(jsonrpc::endpoint::RpcEndpoint& server) {
-  server.RegisterMethodCall(
-      "initialize", [](const std::optional<Json>&) -> asio::awaitable<Json> {
+auto HandleShutdown(std::weak_ptr<RpcEndpoint> weak) -> asio::awaitable<void> {
+  if (auto locked = weak.lock()) {
+    co_await locked->Shutdown();
+  }
+  co_return;
+}
+
+void RegisterLSPHandlers(std::shared_ptr<RpcEndpoint> server) {
+  server->RegisterMethodCall(
+      "initialize", [](std::optional<Json> params) -> asio::awaitable<Json> {
         spdlog::info("LSP Server initialized");
         Json response = {
             {"capabilities",
@@ -48,15 +55,15 @@ void RegisterLSPHandlers(jsonrpc::endpoint::RpcEndpoint& server) {
         co_return response;
       });
 
-  server.RegisterNotification(
-      "initialized", [](const std::optional<Json>&) -> asio::awaitable<void> {
+  server->RegisterNotification(
+      "initialized", [](std::optional<Json> params) -> asio::awaitable<void> {
         spdlog::info("Client initialized");
         co_return;
       });
 
-  server.RegisterMethodCall(
+  server->RegisterMethodCall(
       "textDocument/completion",
-      [](const std::optional<Json>& params) -> asio::awaitable<Json> {
+      [](std::optional<Json> params) -> asio::awaitable<Json> {
         Json response;
         if (params && params->contains("textDocument") &&
             params->contains("position")) {
@@ -68,37 +75,34 @@ void RegisterLSPHandlers(jsonrpc::endpoint::RpcEndpoint& server) {
         co_return response;
       });
 
-  server.RegisterMethodCall(
-      "shutdown", [](const std::optional<Json>&) -> asio::awaitable<Json> {
+  server->RegisterMethodCall(
+      "shutdown", [](std::optional<Json> params) -> asio::awaitable<Json> {
         spdlog::info("Server shutting down");
         co_return Json::object();
       });
 
-  server.RegisterNotification(
-      "exit", [&server](const std::optional<Json>&) -> asio::awaitable<void> {
-        spdlog::info("Server exiting");
-        co_await server.Shutdown();
-      });
+  server->RegisterNotification(
+      "exit", [server](std::optional<Json>) { return HandleShutdown(server); });
 }
 
 // Main server logic encapsulated in a function
-auto RunLSPServer(asio::io_context& io_context, const std::string& pipe_name)
+auto RunLSPServer(asio::any_io_executor executor, std::string pipe_name)
     -> asio::awaitable<void> {
   // Step 1: Create transport
   auto transport =
-      std::make_unique<FramedPipeTransport>(io_context, pipe_name, false);
+      std::make_unique<FramedPipeTransport>(executor, pipe_name, false);
 
   // Step 2: Create RPC endpoint
-  RpcEndpoint server(io_context, std::move(transport));
+  auto server = std::make_shared<RpcEndpoint>(executor, std::move(transport));
 
   // Step 3: Register LSP method handlers
   RegisterLSPHandlers(server);
 
   // Step 4: Start server
-  co_await server.Start();
+  co_await server->Start();
 
   // Step 5: Wait for server shutdown
-  co_await server.WaitForShutdown();
+  co_await server->WaitForShutdown();
 
   spdlog::info("Server shutdown monitoring complete");
   co_return;
@@ -130,9 +134,10 @@ auto main(int argc, char* argv[]) -> int {
 
   // Step 3: Create an io_context for asio operations
   asio::io_context io_context;
+  auto executor = io_context.get_executor();
 
   // Step 4: Launch the server with error handling
-  asio::co_spawn(io_context, RunLSPServer(io_context, pipe_name), HandleError);
+  asio::co_spawn(executor, RunLSPServer(executor, pipe_name), HandleError);
 
   // Step 5: Run the io_context
   io_context.run();

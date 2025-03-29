@@ -19,32 +19,37 @@ using Json = nlohmann::json;
  * boilerplate.
  */
 
+auto HandleStop(std::shared_ptr<RpcEndpoint> server) -> asio::awaitable<void> {
+  if (server) {
+    co_await server->Shutdown();
+  }
+  co_return;
+}
+
 // Main server logic encapsulated in a function
-auto RunServer(asio::io_context& io_context, const std::string& socket_path)
+auto RunServer(asio::any_io_executor executor, std::string socket_path)
     -> asio::awaitable<void> {
   // Step 1: Create transport
   auto transport =
-      std::make_unique<FramedPipeTransport>(io_context, socket_path, true);
+      std::make_unique<FramedPipeTransport>(executor, socket_path, true);
 
   // Step 2: Create RPC endpoint
-  RpcEndpoint server(io_context, std::move(transport));
+  // RpcEndpoint server(executor, std::move(transport));
+  auto server = std::make_shared<RpcEndpoint>(executor, std::move(transport));
 
   // Step 3: Register RPC methods
-  server.RegisterMethodCall("add", Calculator::Add);
-  server.RegisterMethodCall("divide", Calculator::Divide);
+  server->RegisterMethodCall("add", Calculator::Add);
+  server->RegisterMethodCall("divide", Calculator::Divide);
 
   // Step 4: Register stop notification
-  server.RegisterNotification(
-      "stop", [&server](const std::optional<Json>&) -> asio::awaitable<void> {
-        co_await server.Shutdown();
-        co_return;
-      });
+  server->RegisterNotification(
+      "stop", [server](std::optional<Json>) { return HandleStop(server); });
 
   // Step 5: Start server
-  co_await server.Start();
+  co_await server->Start();
 
   // Step 6: Wait for server shutdown
-  co_await server.WaitForShutdown();
+  co_await server->WaitForShutdown();
 
   spdlog::info("Server shutdown complete");
   co_return;
@@ -74,9 +79,10 @@ auto main() -> int {
 
   // Step 2: Create an io_context for asio operations
   asio::io_context io_context;
+  auto executor = io_context.get_executor();
 
   // Step 3: Launch the server with error handling
-  asio::co_spawn(io_context, RunServer(io_context, socket_path), HandleError);
+  asio::co_spawn(executor, RunServer(executor, socket_path), HandleError);
 
   // Step 4: Run the io_context
   io_context.run();

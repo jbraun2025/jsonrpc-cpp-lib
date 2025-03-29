@@ -21,28 +21,28 @@ using jsonrpc::endpoint::RpcEndpoint;
 using jsonrpc::transport::PipeTransport;
 
 // All RPC operations in a separate coroutine function
-auto RunClient(asio::io_context& io_context) -> asio::awaitable<void> {
+auto RunClient(asio::any_io_executor executor) -> asio::awaitable<void> {
   // Step 1: Initialize transport and create RPC client
   const std::string socket_path = "/tmp/calculator_pipe";
   spdlog::info("Connecting to server on: {}", socket_path);
-  auto transport = std::make_unique<PipeTransport>(io_context, socket_path);
+  auto transport = std::make_unique<PipeTransport>(executor, socket_path);
 
   auto client =
-      co_await RpcEndpoint::CreateClient(io_context, std::move(transport));
+      co_await RpcEndpoint::CreateClient(executor, std::move(transport));
 
   // Step 2: Make RPC method calls
   // Example 1: Call "add" method
   const int add_op1 = 10;
   const int add_op2 = 5;
   Json add_params = {{"a", add_op1}, {"b", add_op2}};
-  Json add_result = co_await client->CallMethod("add", add_params);
+  Json add_result = co_await client->SendMethodCall("add", add_params);
   spdlog::info("Add result: {} + {} = {}", add_op1, add_op2, add_result.dump());
 
   // Example 2: Call "divide" method
   const int div_op1 = 10;
   const int div_op2 = 2;
   Json div_params = {{"a", div_op1}, {"b", div_op2}};
-  Json div_result = co_await client->CallMethod("divide", div_params);
+  Json div_result = co_await client->SendMethodCall("divide", div_params);
   spdlog::info("Div result: {} / {} = {}", div_op1, div_op2, div_result.dump());
 
   // Step 3: Send notifications
@@ -77,9 +77,10 @@ auto main() -> int {
 
   // Create ASIO io_context
   asio::io_context io_context;
+  auto executor = io_context.get_executor();
 
   // Launch the RPC operations with our simple error handler
-  asio::co_spawn(io_context, RunClient(io_context), HandleError);
+  asio::co_spawn(executor, RunClient(executor), HandleError);
 
   // Run the ASIO event loop
   spdlog::info("Running io_context");
