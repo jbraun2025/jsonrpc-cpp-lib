@@ -3,7 +3,12 @@
 #include <jsonrpc/endpoint/request.hpp>
 #include <spdlog/spdlog.h>
 
+#include "jsonrpc/endpoint/response.hpp"
+
 namespace jsonrpc::endpoint {
+
+using jsonrpc::error::ErrorCode;
+using jsonrpc::error::RpcError;
 
 Dispatcher::Dispatcher(asio::any_io_executor executor)
     : executor_(std::move(executor)) {
@@ -21,44 +26,59 @@ void Dispatcher::RegisterNotification(
 
 auto Dispatcher::DispatchRequest(std::string request)
     -> asio::awaitable<std::optional<std::string>> {
-  nlohmann::json request_json;
+  nlohmann::json root;
   try {
-    request_json = nlohmann::json::parse(request);
+    root = nlohmann::json::parse(request);
   } catch (const nlohmann::json::parse_error& e) {
-    co_return Response::CreateLibError(ErrorCode::kParseError).ToStr();
+    co_return Response::CreateError(ErrorCode::kParseError).ToJson().dump();
   }
 
-  // Now validate the request
-  if (request_json.is_object() && !Request::ValidateJson(request_json)) {
-    // This is an invalid request error
-    co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
-  }
+  // Single request
+  if (root.is_object()) {
+    auto request = Request::FromJson(root);
+    if (!request.has_value()) {
+      co_return Response::CreateError(request.error()).ToJson().dump();
+    }
 
-  // Handle empty batch requests
-  if (request_json.is_array() && request_json.empty()) {
-    co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
-  }
-
-  if (request_json.is_array()) {
-    co_return co_await DispatchBatchRequest(request_json);
-  }
-
-  auto response_json = co_await DispatchSingleRequest(request_json);
-  if (!response_json) {
+    auto response = co_await DispatchSingleRequest(request.value());
+    if (response.has_value()) {
+      co_return response.value().ToJson().dump();
+    }
     co_return std::nullopt;
   }
 
-  co_return response_json->dump();
-}
+  // Batch request
+  if (root.is_array()) {
+    if (root.empty()) {
+      co_return Response::CreateError(ErrorCode::kInvalidRequest)
+          .ToJson()
+          .dump();
+    }
 
-auto Dispatcher::DispatchSingleRequest(nlohmann::json request_json)
-    -> asio::awaitable<std::optional<nlohmann::json>> {
-  auto validation_result = ValidateRequest(request_json);
-  if (validation_result) {
-    co_return validation_result->ToJson();
+    std::vector<Request> requests;
+    std::vector<Response> responses;
+    for (const auto& element : root) {
+      auto request = Request::FromJson(element);
+      if (!request.has_value()) {
+        responses.push_back(Response::CreateError(request.error()));
+        continue;
+      }
+      requests.push_back(request.value());
+    }
+
+    auto dispatched = co_await DispatchBatchRequest(requests);
+    for (const auto& response : dispatched) {
+      responses.push_back(response);
+    }
+
+    co_return nlohmann::json(responses).dump();
   }
 
-  Request request = Request::FromJson(request_json);
+  co_return Response::CreateError(ErrorCode::kInvalidRequest).ToJson().dump();
+}
+
+auto Dispatcher::DispatchSingleRequest(Request request)
+    -> asio::awaitable<std::optional<Response>> {
   auto method = request.GetMethod();
 
   if (request.IsNotification()) {
@@ -82,81 +102,33 @@ auto Dispatcher::DispatchSingleRequest(nlohmann::json request_json)
           return handler(params);
         },
         asio::use_awaitable);
-    co_return Response::CreateResult(result, request.GetId()).ToJson();
+    co_return Response::CreateSuccess(result, request.GetId());
   }
 
-  co_return Response::CreateLibError(
-      ErrorCode::kMethodNotFound, request.GetId())
-      .ToJson();
+  co_return Response::CreateError(ErrorCode::kMethodNotFound, request.GetId());
 }
 
-auto Dispatcher::DispatchBatchRequest(nlohmann::json request_json)
-    -> asio::awaitable<std::optional<std::string>> {
-  if (request_json.empty()) {
-    co_return Response::CreateLibError(ErrorCode::kInvalidRequest).ToStr();
-  }
-
-  std::vector<asio::awaitable<std::optional<nlohmann::json>>> pending_requests;
-  pending_requests.reserve(request_json.size());
+auto Dispatcher::DispatchBatchRequest(std::vector<Request> requests)
+    -> asio::awaitable<std::vector<Response>> {
+  std::vector<asio::awaitable<std::optional<Response>>> pending;
+  pending.reserve(requests.size());
 
   // Queue all requests in parallel
-  for (const auto& element : request_json) {
-    // Validate individual request objects in the batch
-    if (!element.is_object() || !Request::ValidateJson(element)) {
-      // For invalid requests, create an immediate error response as a coroutine
-      pending_requests.push_back(
-          []() -> asio::awaitable<std::optional<nlohmann::json>> {
-            auto error_json = Response::CreateLibError(
-                                  ErrorCode::kInvalidRequest, std::nullopt)
-                                  .ToJson();
-            co_return error_json;
-          }());
-    } else {
-      // For valid requests, dispatch them normally
-      pending_requests.push_back(DispatchSingleRequest(element));
-    }
+  for (const auto& request : requests) {
+    // For valid requests, dispatch them normally
+    pending.push_back(DispatchSingleRequest(request));
   }
 
   // Wait for all requests to complete
-  std::vector<nlohmann::json> responses;
-  for (auto& pending_request : pending_requests) {
-    auto response = co_await std::move(pending_request);
-    if (response) {
-      responses.push_back(*response);
+  std::vector<Response> responses;
+  for (auto& awaitable_response : pending) {
+    auto response = co_await std::move(awaitable_response);
+    if (response.has_value()) {
+      responses.push_back(response.value());
     }
   }
 
-  if (responses.empty()) {
-    co_return std::nullopt;
-  }
-
-  co_return nlohmann::json(responses).dump();
-}
-
-auto Dispatcher::ValidateRequest(const nlohmann::json& request_json)
-    -> std::optional<Response> {
-  if (!request_json.contains("method")) {
-    return Response::CreateLibError(
-        ErrorCode::kInvalidRequest, "Method is required");
-  }
-
-  const auto& method = request_json["method"];
-  if (!method.is_string()) {
-    return Response::CreateLibError(
-        ErrorCode::kInvalidRequest, "Method must be a string");
-  }
-
-  // For params, if present, must be object or array
-  if (request_json.contains("params")) {
-    const auto& params = request_json["params"];
-    if (!params.is_object() && !params.is_array() && !params.is_null()) {
-      return Response::CreateLibError(
-          ErrorCode::kInvalidParams, "Params must be object or array");
-    }
-  }
-
-  // Request is valid
-  return std::nullopt;
+  co_return responses;
 }
 
 }  // namespace jsonrpc::endpoint

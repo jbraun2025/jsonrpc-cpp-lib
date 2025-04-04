@@ -23,8 +23,9 @@ auto RunClient(asio::any_io_executor executor) -> asio::awaitable<void> {
   const std::string socket_path = "/tmp/typed_calculator_pipe";
   auto transport = std::make_unique<PipeTransport>(executor, socket_path);
 
-  auto client =
+  auto client_result =
       co_await RpcEndpoint::CreateClient(executor, std::move(transport));
+  auto client = std::move(client_result.value());
 
   // Call "add" method with typed params and result
   AddParams add_params{.a = 10.0, .b = 5.0};
@@ -32,20 +33,22 @@ auto RunClient(asio::any_io_executor executor) -> asio::awaitable<void> {
   // Send the method call with typed params and receive typed result
   // Note how we specify the parameter and result types in the template
   // arguments
-  Result add_result =
+  auto add_result =
       co_await client->SendMethodCall<AddParams, Result>("add", add_params);
 
   // Access the result using the typed struct
   spdlog::info(
-      "Add result: {} + {} = {}", add_params.a, add_params.b, add_result.value);
+      "Add result: {} + {} = {}", add_params.a, add_params.b,
+      add_result.value().value);
 
   // Call "divide" method with typed params and result
   DivideParams div_params{.a = 10.0, .b = 2.0};
-  Result div_result = co_await client->SendMethodCall<DivideParams, Result>(
+  auto div_result = co_await client->SendMethodCall<DivideParams, Result>(
       "divide", div_params);
+
   spdlog::info(
       "Divide result: {} / {} = {}", div_params.a, div_params.b,
-      div_result.value);
+      div_result.value().value);
 
   // Send notification to shut down the server
   co_await client->SendNotification("stop");
