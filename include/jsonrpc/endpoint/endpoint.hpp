@@ -12,6 +12,7 @@
 #include <spdlog/spdlog.h>
 
 #include "jsonrpc/endpoint/dispatcher.hpp"
+#include "jsonrpc/endpoint/json_trait.hpp"
 #include "jsonrpc/endpoint/pending_request.hpp"
 #include "jsonrpc/endpoint/response.hpp"
 #include "jsonrpc/endpoint/typed_handlers.hpp"
@@ -58,9 +59,7 @@ class RpcEndpoint {
   auto SendMethodCall(std::string method, ParamsType params)
       -> asio::awaitable<std::expected<ResultType, RpcError>>
     requires(
-        !std::is_same_v<std::decay_t<ParamsType>, nlohmann::json> &&
-        !std::is_same_v<
-            std::decay_t<ParamsType>, std::optional<nlohmann::json>>);
+        ToJson<ParamsType> && NotJsonLike<ParamsType> && FromJson<ResultType>);
 
   auto SendNotification(
       std::string method, std::optional<nlohmann::json> params = std::nullopt)
@@ -69,10 +68,7 @@ class RpcEndpoint {
   template <typename ParamsType>
   auto SendNotification(std::string method, ParamsType params)
       -> asio::awaitable<std::expected<void, RpcError>>
-    requires(
-        !std::is_same_v<std::decay_t<ParamsType>, nlohmann::json> &&
-        !std::is_same_v<
-            std::decay_t<ParamsType>, std::optional<nlohmann::json>>);
+    requires(ToJson<ParamsType> && NotJsonLike<ParamsType>);
 
   void RegisterMethodCall(
       std::string method, typename Dispatcher::MethodCallHandler handler);
@@ -80,15 +76,26 @@ class RpcEndpoint {
   template <typename ParamsType, typename ResultType>
   void RegisterMethodCall(
       std::string method,
-      std::function<asio::awaitable<ResultType>(ParamsType)> handler);
+      std::function<asio::awaitable<ResultType>(ParamsType)> handler)
+    requires(FromJson<ParamsType> && ToJson<ResultType>);
+
+  template <typename ParamsType, typename ResultType, typename ErrorType>
+  void RegisterMethodCall(
+      std::string method,
+      std::function<
+          asio::awaitable<std::expected<ResultType, ErrorType>>(ParamsType)>
+          handler)
+    requires(FromJson<ParamsType> && ToJson<ResultType> && ToJson<ErrorType>);
 
   void RegisterNotification(
       std::string method, typename Dispatcher::NotificationHandler handler);
 
-  template <typename ParamsType>
+  template <typename ParamsType, typename ErrorType>
   void RegisterNotification(
       std::string method,
-      std::function<asio::awaitable<void>(ParamsType)> handler);
+      std::function<asio::awaitable<std::expected<void, ErrorType>>(ParamsType)>
+          handler)
+    requires(FromJson<ParamsType>);
 
   [[nodiscard]] auto HasPendingRequests() const -> bool;
 
@@ -132,8 +139,7 @@ template <typename ParamsType, typename ResultType>
 auto RpcEndpoint::SendMethodCall(std::string method, ParamsType params)
     -> asio::awaitable<std::expected<ResultType, RpcError>>
   requires(
-      !std::is_same_v<std::decay_t<ParamsType>, nlohmann::json> &&
-      !std::is_same_v<std::decay_t<ParamsType>, std::optional<nlohmann::json>>)
+      ToJson<ParamsType> && NotJsonLike<ParamsType> && FromJson<ResultType>)
 {
   spdlog::debug("RpcEndpoint sending typed method call: {}", method);
   nlohmann::json json_params;
@@ -143,7 +149,7 @@ auto RpcEndpoint::SendMethodCall(std::string method, ParamsType params)
     spdlog::error(
         "RpcEndpoint failed to convert parameters to JSON: {}", ex.what());
     co_return RpcError::UnexpectedFromCode(
-        RpcErrorCode::kClientError,
+        RpcErrorCode::kClientSerializationError,
         "RpcEndpoint failed to convert parameters to JSON: " +
             std::string(ex.what()));
   }
@@ -158,7 +164,7 @@ auto RpcEndpoint::SendMethodCall(std::string method, ParamsType params)
   } catch (const nlohmann::json::exception &ex) {
     spdlog::error("RpcEndpoint failed to convert result: {}", ex.what());
     co_return RpcError::UnexpectedFromCode(
-        RpcErrorCode::kClientError,
+        RpcErrorCode::kClientDeserializationError,
         "RpcEndpoint failed to convert result: " + std::string(ex.what()));
   }
 }
@@ -166,9 +172,7 @@ auto RpcEndpoint::SendMethodCall(std::string method, ParamsType params)
 template <typename ParamsType>
 auto RpcEndpoint::SendNotification(std::string method, ParamsType params)
     -> asio::awaitable<std::expected<void, RpcError>>
-  requires(
-      !std::is_same_v<std::decay_t<ParamsType>, nlohmann::json> &&
-      !std::is_same_v<std::decay_t<ParamsType>, std::optional<nlohmann::json>>)
+  requires(ToJson<ParamsType> && NotJsonLike<ParamsType>)
 {
   spdlog::debug("RpcEndpoint sending typed notification: {}", method);
   nlohmann::json json_params;
@@ -178,7 +182,7 @@ auto RpcEndpoint::SendNotification(std::string method, ParamsType params)
     spdlog::error(
         "RpcEndpoint failed to convert notification parameters: {}", ex.what());
     co_return RpcError::UnexpectedFromCode(
-        RpcErrorCode::kClientError,
+        RpcErrorCode::kClientSerializationError,
         "RpcEndpoint failed to convert notification parameters: " +
             std::string(ex.what()));
   }
@@ -194,7 +198,9 @@ auto RpcEndpoint::SendNotification(std::string method, ParamsType params)
 template <typename ParamsType, typename ResultType>
 void RpcEndpoint::RegisterMethodCall(
     std::string method,
-    std::function<asio::awaitable<ResultType>(ParamsType)> handler) {
+    std::function<asio::awaitable<ResultType>(ParamsType)> handler)
+  requires(FromJson<ParamsType> && ToJson<ResultType>)
+{
   // Create a handler object and store its function object
   // NOTE: We use a shared_ptr to ensure the handler object stays alive
   // throughout the entire lifetime of any coroutine that might use it. This
@@ -211,16 +217,38 @@ void RpcEndpoint::RegisterMethodCall(
           std::optional<nlohmann::json> params) { return (*handler)(params); });
 }
 
-template <typename ParamsType>
+template <typename ParamsType, typename ResultType, typename ErrorType>
+void RpcEndpoint::RegisterMethodCall(
+    std::string method,
+    std::function<
+        asio::awaitable<std::expected<ResultType, ErrorType>>(ParamsType)>
+        handler)
+  requires(FromJson<ParamsType> && ToJson<ResultType> && ToJson<ErrorType>)
+{
+  auto typed_handler =
+      std::make_shared<TypedMethodHandler<ParamsType, ResultType, ErrorType>>(
+          std::move(handler));
+
+  RegisterMethodCall(
+      method,
+      [handler = std::move(typed_handler)](
+          std::optional<nlohmann::json> params) { return (*handler)(params); });
+}
+
+template <typename ParamsType, typename ErrorType>
 void RpcEndpoint::RegisterNotification(
     std::string method,
-    std::function<asio::awaitable<void>(ParamsType)> handler) {
+    std::function<asio::awaitable<std::expected<void, ErrorType>>(ParamsType)>
+        handler)
+  requires(FromJson<ParamsType>)
+{
   // Create a handler object and store its function object
   // NOTE: Using a class-based approach with shared_ptr ownership guarantees
   // the handler remains valid even when coroutines are suspended and resumed,
   // which is safer than direct lambda captures that may go out of scope.
-  auto typed_handler = std::make_shared<TypedNotificationHandler<ParamsType>>(
-      std::move(handler));
+  auto typed_handler =
+      std::make_shared<TypedNotificationHandler<ParamsType, ErrorType>>(
+          std::move(handler));
 
   // Register a lambda that calls the handler object
   RegisterNotification(
